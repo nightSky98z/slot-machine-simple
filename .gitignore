@@ -69,3 +69,4 @@ Testing/
 .cache/
 a.out
 .clang_format
+/.clang-format
