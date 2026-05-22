@@ -70,3 +70,6 @@ Testing/
 a.out
 .clang_format
 /.clang-format
+docs/superpowers/
+slot-machine
+tests/

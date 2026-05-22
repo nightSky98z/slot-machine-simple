@@ -3,6 +3,7 @@
 #include <charconv>
 #include <cstddef>
 #include <cstdint>
+#include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -190,6 +191,66 @@ static const char* symbol_name(const Symbol symbol)
   return "Unknown";
 }
 
+enum class MessageLevel
+{
+  Info,
+  Warning,
+  Error,
+};
+
+struct MessageStyle
+{
+  const char* color_code = "";
+  const char* label = "";
+};
+
+static MessageStyle message_style(const MessageLevel level)
+{
+  switch (level) {
+  case MessageLevel::Info:
+    return MessageStyle{"\033[1;32m", "Info"};
+  case MessageLevel::Warning:
+    return MessageStyle{"\033[1;33m", "Warning"};
+  case MessageLevel::Error:
+    return MessageStyle{"\033[1;31m", "Error"};
+  }
+
+  assert(false && "Unknown MessageLevel value");
+  return MessageStyle{};
+}
+
+static void print_prefixed(const MessageLevel level, const char* format,
+                           std::va_list args)
+{
+  const MessageStyle style = message_style(level);
+  std::printf("%s%s:\033[0m ", style.color_code, style.label);
+  std::vprintf(format, args);
+}
+
+static void print_info(const char* format, ...)
+{
+  std::va_list args;
+  va_start(args, format);
+  print_prefixed(MessageLevel::Info, format, args);
+  va_end(args);
+}
+
+static void print_warning(const char* format, ...)
+{
+  std::va_list args;
+  va_start(args, format);
+  print_prefixed(MessageLevel::Warning, format, args);
+  va_end(args);
+}
+
+static void print_error(const char* format, ...)
+{
+  std::va_list args;
+  va_start(args, format);
+  print_prefixed(MessageLevel::Error, format, args);
+  va_end(args);
+}
+
 /**
  * @brief 1次元配列上のリール内部 index を作る。
  */
@@ -215,11 +276,22 @@ static std::size_t visible_index(const std::size_t row, const std::size_t reel)
 /**
  * @brief リールを輪として扱うため、index
  * を範囲内へ戻す。
+ */
+struct WrapIndexRequest
+{
+  std::size_t index = 0;
+  std::int32_t offset = 0;
+  std::size_t length = 0;
+};
+
+/**
+ * @brief リールを輪として扱うため、index
+ * を範囲内へ戻す。
  *
- * @param[in] index 基準 index。
- * @param[in] offset index
+ * @param[in] request index
+ * は基準位置、offset は index
  * に加える相対位置。今回の用途では -1, 0, +1。
- * @param[in] length 輪として扱う配列長。
+ * length は輪として扱う配列長。
  * @return 0 <= result < length を満たす index。
  *
  * @note Caller:
@@ -228,10 +300,12 @@ static std::size_t visible_index(const std::size_t row, const std::size_t reel)
  * - 現在の実装は offset が -1, 0, +1
  * の範囲であることを前提にする。
  */
-static std::size_t wrap_index(const std::size_t index,
-                              const std::int32_t offset,
-                              const std::size_t length)
+static std::size_t wrap_index(const WrapIndexRequest request)
 {
+  const std::size_t index = request.index;
+  const std::int32_t offset = request.offset;
+  const std::size_t length = request.length;
+
   assert(length > 0);
   assert(index < length);
   assert(offset >= -1);
@@ -262,6 +336,15 @@ static std::size_t wrap_index(const std::size_t index,
 
 /**
  * @brief 賭け金とスロット内 credit を管理する。
+ */
+struct BetManagerConfig
+{
+  std::int32_t initial_credit = 0;
+  std::int32_t bet = 0;
+};
+
+/**
+ * @brief 賭け金とスロット内 credit を管理する。
  *
  * @note Caller:
  * - credit は SlotMachine 内だけで変更する。
@@ -271,11 +354,11 @@ static std::size_t wrap_index(const std::size_t index,
 class BetManager
 {
 public:
-  BetManager(const std::int32_t initial_credit, const std::int32_t bet)
-      : credit_(initial_credit), bet_(bet)
+  explicit BetManager(const BetManagerConfig config)
+      : credit_(config.initial_credit), bet_(config.bet)
   {
-    assert(initial_credit >= 0);
-    assert(bet > 0);
+    assert(config.initial_credit >= 0);
+    assert(config.bet > 0);
   }
 
   std::int32_t credit() const
@@ -415,10 +498,12 @@ public:
         continue;
       }
 
-      const std::size_t top_index = wrap_index(center_index, -1, kStripLength);
-      const std::size_t mid_index = wrap_index(center_index, 0, kStripLength);
+      const std::size_t top_index =
+          wrap_index(WrapIndexRequest{center_index, -1, kStripLength});
+      const std::size_t mid_index =
+          wrap_index(WrapIndexRequest{center_index, 0, kStripLength});
       const std::size_t bottom_index =
-          wrap_index(center_index, 1, kStripLength);
+          wrap_index(WrapIndexRequest{center_index, 1, kStripLength});
 
       visible[visible_index(0, reel)] =
           strips_[reel_strip_index(reel, top_index)];
@@ -435,12 +520,13 @@ public:
 
   void show_reel_strips() const
   {
-    std::printf("Generated reel strips:\n");
+    print_info("生成されたリール配列:\n");
 
     for (std::size_t reel = 0; reel < kReelCount; ++reel) {
-      std::printf("Reel %zu: ", reel);
+      std::printf("リール %zu: ", reel);
 
-      for (int strip_index = 0; strip_index < kStripLength; ++strip_index) {
+      for (std::size_t strip_index = 0; strip_index < kStripLength;
+           ++strip_index) {
         const Symbol symbol = strips_[reel_strip_index(reel, strip_index)];
         std::printf("%s ", symbol_name(symbol));
       }
@@ -463,11 +549,11 @@ public:
 
   void show_stop_from_left(const VisibleSymbols& visible) const
   {
-    std::printf("Stop reels from left:\n");
+    print_info("左からリールを停止します:\n");
 
     for (std::size_t stopped_reel = 0; stopped_reel < kReelCount;
          ++stopped_reel) {
-      std::printf("\nStopped reel: %zu\n", stopped_reel);
+      std::printf("\n停止したリール: %zu\n", stopped_reel);
 
       for (std::size_t row = 0; row < kVisibleRows; ++row) {
         for (std::size_t reel = 0; reel < kReelCount; ++reel) {
@@ -475,7 +561,7 @@ public:
             const Symbol symbol = visible[visible_index(row, reel)];
             std::printf("%-8s ", symbol_name(symbol));
           } else {
-            std::printf("%-8s ", "Spin");
+            std::printf("%-8s ", "回転中");
           }
         }
 
@@ -556,6 +642,17 @@ struct RewardSystem
 /**
  * @brief スロットマシン 1
  * 台分の状態と処理を所有する。
+ */
+struct SlotMachineConfig
+{
+  std::int32_t initial_credit = 0;
+  std::int32_t bet = 0;
+  std::uint32_t seed = 0;
+};
+
+/**
+ * @brief スロットマシン 1
+ * 台分の状態と処理を所有する。
  *
  * @note Caller:
  * - GameState::mode == Slot の間だけ存在させる。
@@ -565,13 +662,13 @@ struct RewardSystem
 class SlotMachine
 {
 public:
-  SlotMachine(const std::int32_t initial_credit, const std::int32_t bet,
-              const std::uint32_t seed)
-      : bet_manager_{initial_credit, bet}, random_system_(seed),
+  explicit SlotMachine(const SlotMachineConfig config)
+      : bet_manager_{BetManagerConfig{config.initial_credit, config.bet}},
+        random_system_(config.seed),
         reel_system_(random_system_.make_random_reel_strips())
   {
-    assert(initial_credit >= bet);
-    assert(bet > 0);
+    assert(config.initial_credit >= config.bet);
+    assert(config.bet > 0);
   }
 
   std::int32_t credit() const
@@ -601,11 +698,11 @@ public:
 
   bool spin_once()
   {
-    std::printf("\nCredit before spin: %d\n", bet_manager_.credit());
-    std::printf("Bet: %d\n\n", bet_manager_.bet());
+    print_info("スピン前のクレジット: %d\n", bet_manager_.credit());
+    print_info("ベット: %d\n\n", bet_manager_.bet());
 
     if (!bet_manager_.consume_bet()) {
-      std::printf("Not enough credit.\n");
+      print_warning("クレジットが足りません。\n");
       return false;
     }
 
@@ -616,15 +713,15 @@ public:
 
     reel_system_.show_stop_from_left(result.visible);
 
-    std::printf("\nFinal result:\n");
+    print_info("最終結果:\n");
     reel_system_.show_all_reels(result.visible);
 
     result.payout =
         judge_system_.calc_payout(result.visible, bet_manager_.bet());
     reward_system_.apply_payout(bet_manager_, result.payout);
 
-    std::printf("\nPayout: %d\n", result.payout);
-    std::printf("Credit after spin: %d\n", bet_manager_.credit());
+    print_info("払い出し: %d\n", result.payout);
+    print_info("スピン後のクレジット: %d\n", bet_manager_.credit());
 
     return true;
   }
@@ -823,7 +920,7 @@ static bool read_command_retry(char& out_command)
       return false;
     }
 
-    std::printf("Input error. Please input one command character.\n");
+    print_warning("入力エラーです。1文字のコマンドを入力してください。\n");
     std::printf("> ");
   }
 }
@@ -839,13 +936,13 @@ static void update_lobby(GameState& game,
   assert(slot_machine == nullptr);
 
   if (command != 's') {
-    std::printf("Unknown command.\n");
+    print_warning("不明なコマンドです。\n");
     return;
   }
 
   if (game.money < kDefaultBet) {
-    std::printf("Not enough money to start slot machine.\n");
-    std::printf("Game Over.\n");
+    print_warning("スロットマシンを始めるための所持金が足りません。\n");
+    print_info("ゲームオーバーです。\n");
     game.is_game_over = true;
     game.is_running = false;
     return;
@@ -856,34 +953,39 @@ static void update_lobby(GameState& game,
               game.money);
 
   if (!read_int32_from_stdin(credit)) {
-    std::printf("Input error.\n");
+    print_warning("入力エラーです。\n");
     game.is_running = false;
     return;
   }
 
   if (credit <= 0) {
-    std::printf("Credit must be positive.\n");
+    print_warning("クレジットは1以上を入力してください。\n");
     return;
   }
 
   if (credit > game.money) {
-    std::printf("Not enough money.\n");
+    print_warning("所持金が足りません。\n");
     return;
   }
 
   if (credit < kDefaultBet) {
-    std::printf("Credit must be >= bet. Bet: %d\n", kDefaultBet);
+    print_warning("クレジットはベット以上にしてください。ベット: %d\n",
+                  kDefaultBet);
     return;
   }
 
   game.money -= credit;
-  slot_machine = std::make_unique<SlotMachine>(
-      credit, kDefaultBet, static_cast<std::uint32_t>(seed()));
+  SlotMachineConfig slot_config{};
+  slot_config.initial_credit = credit;
+  slot_config.bet = kDefaultBet;
+  slot_config.seed = static_cast<std::uint32_t>(seed());
+
+  slot_machine = std::make_unique<SlotMachine>(slot_config);
 
   slot_machine->show_reel_strips();
   game.mode = GameMode::Slot;
   assert_slot_state_valid(game, slot_machine);
-  std::printf("Enter slot machine.\n");
+  print_info("スロットマシンに入りました。\n");
 }
 
 /**
@@ -897,7 +999,7 @@ static void update_slot(GameState& game,
   assert(slot_machine != nullptr);
 
   if (!slot_machine) {
-    std::printf("Slot state error: slot machine is missing.\n");
+    print_error("スロット状態エラー: スロットマシンがありません。\n");
     game.mode = GameMode::Lobby;
     game.is_running = false;
     return;
@@ -906,12 +1008,12 @@ static void update_slot(GameState& game,
   if (command == 'e') {
     const std::int32_t returned_credit = exit_slot_machine(game, slot_machine);
 
-    std::printf("Exit slot machine.\n");
-    std::printf("Returned credit: %d\n", returned_credit);
-    std::printf("Money: %d\n", game.money);
+    print_info("スロットマシンから出ました。\n");
+    print_info("返却クレジット: %d\n", returned_credit);
+    print_info("所持金: %d\n", game.money);
 
     if (game.money >= kCompleteMoney) {
-      std::printf("Game Complete!\n");
+      print_info("ゲームクリア！\n");
       game.is_complete = true;
       game.is_running = false;
     }
@@ -920,20 +1022,20 @@ static void update_slot(GameState& game,
   }
 
   if (command != 's') {
-    std::printf("Unknown command.\n");
+    print_warning("不明なコマンドです。\n");
     return;
   }
 
   if (!slot_machine->can_spin()) {
     const std::int32_t returned_credit = exit_slot_machine(game, slot_machine);
 
-    std::printf("Credit is less than bet.\n");
-    std::printf("Auto exit slot machine.\n");
-    std::printf("Returned credit: %d\n", returned_credit);
-    std::printf("Money: %d\n", game.money);
+    print_warning("クレジットがベットより少ないです。\n");
+    print_warning("クレジット不足のため、自動でスロットマシンから出ます。\n");
+    print_info("返却クレジット: %d\n", returned_credit);
+    print_info("所持金: %d\n", game.money);
 
     if (game.money < kDefaultBet) {
-      std::printf("Game Over.\n");
+      print_info("ゲームオーバーです。\n");
       game.is_game_over = true;
       game.is_running = false;
     }
@@ -947,8 +1049,8 @@ static void update_slot(GameState& game,
     const std::int32_t returned_credit = exit_slot_machine(game, slot_machine);
     static_cast<void>(returned_credit);
 
-    std::printf("Game Complete!\n");
-    std::printf("Final Money: %d\n", game.money);
+    print_info("ゲームクリア！\n");
+    print_info("最終所持金: %d\n", game.money);
 
     game.is_complete = true;
     game.is_running = false;
@@ -958,13 +1060,13 @@ static void update_slot(GameState& game,
   if (!slot_machine->can_spin()) {
     const std::int32_t returned_credit = exit_slot_machine(game, slot_machine);
 
-    std::printf("Credit is less than bet.\n");
-    std::printf("Auto exit slot machine.\n");
-    std::printf("Returned credit: %d\n", returned_credit);
-    std::printf("Money: %d\n", game.money);
+    print_warning("クレジットがベットより少ないです。\n");
+    print_warning("クレジット不足のため、自動でスロットマシンから出ます。\n");
+    print_info("返却クレジット: %d\n", returned_credit);
+    print_info("所持金: %d\n", game.money);
 
     if (game.money < kDefaultBet) {
-      std::printf("Game Over.\n");
+      print_info("ゲームオーバーです。\n");
       game.is_game_over = true;
       game.is_running = false;
     }
@@ -982,28 +1084,28 @@ int main()
     assert_slot_state_valid(game, slot_machine);
 
     std::printf("\n==============================\n");
-    std::printf("Money: %d\n", game.money);
+    std::printf("所持金: %d\n", game.money);
 
     if (game.mode == GameMode::Lobby) {
       assert(slot_machine == nullptr);
 
-      std::printf("State: Lobby\n");
-      std::printf("Command: s = start slot, q = "
-                  "quit game\n");
+      std::printf("状態: ロビー\n");
+      std::printf("コマンド: s = スロット開始, q = "
+                  "ゲーム終了\n");
     } else {
       assert(game.mode == GameMode::Slot);
       assert(slot_machine != nullptr);
 
       if (!slot_machine) {
-        std::printf("Slot state error: slot machine is missing.\n");
+        print_error("スロット状態エラー: スロットマシンがありません。\n");
         break;
       }
 
-      std::printf("State: Slot\n");
-      std::printf("Credit: %d\n", slot_machine->credit());
-      std::printf("Bet: %d\n", slot_machine->bet());
-      std::printf("Command: s = spin, e = exit "
-                  "slot, q = quit game\n");
+      std::printf("状態: スロット\n");
+      std::printf("クレジット: %d\n", slot_machine->credit());
+      std::printf("ベット: %d\n", slot_machine->bet());
+      std::printf("コマンド: s = スピン, e = "
+                  "スロット終了, q = ゲーム終了\n");
     }
 
     std::printf("> ");
@@ -1011,7 +1113,7 @@ int main()
     char command = 0;
 
     if (!read_command_retry(command)) {
-      std::printf("Input closed.\n");
+      print_warning("入力が終了しました。\n");
       break;
     }
 
@@ -1022,7 +1124,7 @@ int main()
       }
 
       game.mode = GameMode::Lobby;
-      std::printf("Quit game.\n");
+      print_info("ゲームを終了します。\n");
       game.is_running = false;
       break;
     }
